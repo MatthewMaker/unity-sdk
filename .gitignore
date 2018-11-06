@@ -63,6 +63,7 @@ etc.meta
 /Travis/build.sh.meta
 /Travis/createProject.sh.meta
 /Travis/installSDK.sh.meta
+/Travis/installTestTools.sh.meta
 /Travis/installUnity.sh.meta
 /Travis/README.md.meta
 /Travis/runTests.sh.meta
@@ -72,3 +73,8 @@ Docs/publishing-release.md.meta
 *.md.meta
 *.txt.meta
 *.ps1.meta
+**/.swagger-codegen-ignore
+**/.swagger-codegen
+/Scripts/Editor/Help/
+/Scripts/Editor/Help.meta
+*/MRefBuilder.config.meta

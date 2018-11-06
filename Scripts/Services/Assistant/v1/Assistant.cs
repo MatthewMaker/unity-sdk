@@ -22,10 +22,11 @@ using IBM.Watson.DeveloperCloud.Connection;
 using IBM.Watson.DeveloperCloud.Logging;
 using IBM.Watson.DeveloperCloud.Utilities;
 using System;
+using MiniJSON;
 
 namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
 {
-    public class Assistant : IWatsonService, IAssistant
+    public class Assistant : IWatsonService
     {
         private const string ServiceId = "Assistantv1";
         private fsSerializer _serializer = new fsSerializer();
@@ -67,38 +68,43 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             set { _versionDate = value; }
         }
 
+        #region Callback delegates
+        /// <summary>
+        /// Success callback delegate.
+        /// </summary>
+        /// <typeparam name="T">Type of the returned object.</typeparam>
+        /// <param name="response">The returned object.</param>
+        /// <param name="customData">user defined custom data including raw json.</param>
+        public delegate void SuccessCallback<T>(T response, Dictionary<string, object> customData);
+
+        /// <summary>
+        /// Fail callback delegate.
+        /// </summary>
+        /// <param name="error">The error object.</param>
+        /// <param name="customData">User defined custom data</param>
+        public delegate void FailCallback(RESTConnector.Error error, Dictionary<string, object> customData);
+        #endregion
+
         /// <summary>
         /// Assistant constructor.
         /// </summary>
         /// <param name="credentials">The service credentials.</param>
         public Assistant(Credentials credentials)
         {
-            if (credentials.HasCredentials() || credentials.HasAuthorizationToken())
+            if (credentials.HasCredentials() || credentials.HasWatsonAuthenticationToken() || credentials.HasIamTokenData())
             {
                 Credentials = credentials;
+
+                if (string.IsNullOrEmpty(credentials.Url))
+                {
+                    credentials.Url = Url;
+                }
             }
             else
             {
                 throw new WatsonException("Please provide a username and password or authorization token to use the Assistant service. For more information, see https://github.com/watson-developer-cloud/unity-sdk/#configuring-your-service-credentials");
             }
         }
-
-        //#region Callback delegates
-        ///// <summary>
-        ///// Success callback delegate.
-        ///// </summary>
-        ///// <typeparam name="T">Type of the returned object.</typeparam>
-        ///// <param name="response">The returned object.</param>
-        ///// <param name="customData">user defined custom data including raw json.</param>
-        //public delegate void SuccessCallback<T>(T response, Dictionary<string, object> customData);
-
-        ///// <summary>
-        ///// Fail callback delegate.
-        ///// </summary>
-        ///// <param name="error">The error object.</param>
-        ///// <param name="customData">User defined custom data</param>
-        //public delegate void FailCallback(RESTConnector.Error error, Dictionary<string, object> customData);
-        //#endregion
 
         /// <summary>
         /// Get a response to a user's input.    There is no rate limit for this operation. 
@@ -108,24 +114,54 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
         /// <param name="workspaceId">Unique identifier of the workspace.</param>
         /// <param name="request">The message to be sent. This includes the user's input, along with optional intents, entities, and context from the last response. (optional)</param>
         /// <param name="nodesVisitedDetails">Whether to include additional diagnostic information about the dialog nodes that were visited during processing of the message. (optional, default to false)</param>
-        /// <returns><see cref="MessageResponse" />MessageResponse</returns>
         /// <param name="customData">A Dictionary<string, object> of data that will be passed to the callback. The raw json output from the REST call will be passed in this object as the value of the 'json' key.</string></param>
-        public bool Message(SuccessCallback<MessageResponse> successCallback, FailCallback failCallback, string workspaceId, MessageRequest request = null, bool? nodesVisitedDetails = null, Dictionary<string, object> customData = null)
+        public bool Message(SuccessCallback<object> successCallback, FailCallback failCallback, string workspaceId, MessageRequest request = null, bool? nodesVisitedDetails = null, Dictionary<string, object> customData = null)
         {
             if (successCallback == null)
                 throw new ArgumentNullException("successCallback");
             if (failCallback == null)
                 throw new ArgumentNullException("failCallback");
 
+            IDictionary<string, string> requestDict = new Dictionary<string, string>();
+            if (request.Context != null)
+                requestDict.Add("context", Json.Serialize(request.Context));
+            if (request.Input != null)
+                requestDict.Add("input", Json.Serialize(request.Input));
+            if(request.AlternateIntents != null)
+                requestDict.Add("alternate_intents", Json.Serialize(request.AlternateIntents));
+            if (request.Entities != null)
+                requestDict.Add("entities", Json.Serialize(request.Entities));
+            if (request.Intents != null)
+                requestDict.Add("intents", Json.Serialize(request.Intents));
+            if (request.Output != null)
+                requestDict.Add("output", Json.Serialize(request.Output));
+
+            int iterator = 0;
+            StringBuilder stringBuilder = new StringBuilder("{");
+            foreach (KeyValuePair<string, string> property in requestDict)
+            {
+                string delimeter = iterator < requestDict.Count - 1 ? "," : "";
+                stringBuilder.Append(string.Format("\"{0}\": {1}{2}", property.Key, property.Value, delimeter));
+                iterator++;
+            }
+            stringBuilder.Append("}");
+
+            string stringToSend = stringBuilder.ToString();
+
             MessageRequestObj req = new MessageRequestObj();
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
-            fsData data = null;
-            _serializer.TrySerialize(request.Input, out data);
-            req.Send = Encoding.UTF8.GetBytes(data.ToString());
+            req.Send = Encoding.UTF8.GetBytes(stringToSend);
             req.OnResponse = OnMessageResponse;
 
             RESTConnector connector = RESTConnector.GetConnector(Credentials, string.Format("/v1/workspaces/{0}/message", workspaceId));
@@ -140,7 +176,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             /// <summary>
             /// The success callback.
             /// </summary>
-            public SuccessCallback<MessageResponse> SuccessCallback { get; set; }
+            public SuccessCallback<object> SuccessCallback { get; set; }
             /// <summary>
             /// The fail callback.
             /// </summary>
@@ -153,24 +189,18 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
 
         private void OnMessageResponse(RESTConnector.Request req, RESTConnector.Response resp)
         {
-            MessageResponse result = new MessageResponse();
-            fsData data = null;
+            object result = null;
+            string data = "";
             Dictionary<string, object> customData = ((MessageRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
                 try
                 {
-                    fsResult r = fsJsonParser.Parse(Encoding.UTF8.GetString(resp.Data), out data);
-                    if (!r.Succeeded)
-                        throw new WatsonException(r.FormattedMessages);
-
-                    object obj = result;
-                    r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
-                    if (!r.Succeeded)
-                        throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
+                    //  For deserializing into a generic object
+                    data = Encoding.UTF8.GetString(resp.Data);
+                    result = Json.Deserialize(data);
                 }
                 catch (Exception e)
                 {
@@ -178,6 +208,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -209,6 +241,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -245,6 +284,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Workspace result = new Workspace();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateWorkspaceRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -258,8 +298,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -267,6 +305,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -299,6 +339,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -332,6 +379,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteWorkspaceRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -345,8 +393,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -354,6 +400,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -388,6 +436,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (includeAudit != null)
                 req.Parameters["include_audit"] = includeAudit;
             req.Parameters["version"] = VersionDate;
@@ -422,6 +477,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             WorkspaceExport result = new WorkspaceExport();
             fsData data = null;
             Dictionary<string, object> customData = ((GetWorkspaceRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -435,8 +491,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -444,6 +498,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -480,6 +536,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (pageLimit != null)
                 req.Parameters["page_limit"] = pageLimit;
@@ -521,6 +584,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             WorkspaceCollection result = new WorkspaceCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListWorkspacesRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -534,8 +598,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -543,6 +605,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -577,6 +641,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -612,6 +683,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Workspace result = new Workspace();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateWorkspaceRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -625,8 +697,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -634,6 +704,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -666,6 +738,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -701,6 +780,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Intent result = new Intent();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateIntentRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -714,8 +794,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -723,6 +801,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -756,6 +836,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -789,6 +876,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteIntentRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -802,8 +890,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -811,6 +897,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -846,6 +934,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (includeAudit != null)
                 req.Parameters["include_audit"] = includeAudit;
             req.Parameters["version"] = VersionDate;
@@ -880,6 +975,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             IntentExport result = new IntentExport();
             fsData data = null;
             Dictionary<string, object> customData = ((GetIntentRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -893,8 +989,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -902,6 +996,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -940,6 +1036,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (export != null)
                 req.Parameters["export"] = export;
@@ -983,6 +1086,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             IntentCollection result = new IntentCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListIntentsRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -996,8 +1100,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1005,6 +1107,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1039,6 +1143,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -1074,6 +1185,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Intent result = new Intent();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateIntentRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1087,8 +1199,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1096,6 +1206,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1129,6 +1241,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -1164,6 +1283,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Example result = new Example();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateExampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1177,8 +1297,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1186,6 +1304,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1220,6 +1340,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -1253,6 +1380,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteExampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1266,8 +1394,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1275,6 +1401,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1310,6 +1438,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (includeAudit != null)
                 req.Parameters["include_audit"] = includeAudit;
@@ -1343,6 +1478,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Example result = new Example();
             fsData data = null;
             Dictionary<string, object> customData = ((GetExampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1356,8 +1492,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1365,6 +1499,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1403,6 +1539,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (pageLimit != null)
                 req.Parameters["page_limit"] = pageLimit;
@@ -1444,6 +1587,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             ExampleCollection result = new ExampleCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListExamplesRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1457,8 +1601,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1466,6 +1608,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1501,6 +1645,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -1536,6 +1687,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Example result = new Example();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateExampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1549,8 +1701,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1558,6 +1708,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1590,6 +1742,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -1625,6 +1784,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Counterexample result = new Counterexample();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateCounterexampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1638,8 +1798,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1647,6 +1805,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1680,6 +1840,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -1713,6 +1880,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteCounterexampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1726,8 +1894,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1735,6 +1901,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1769,6 +1937,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (includeAudit != null)
                 req.Parameters["include_audit"] = includeAudit;
             req.Parameters["version"] = VersionDate;
@@ -1803,6 +1978,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Counterexample result = new Counterexample();
             fsData data = null;
             Dictionary<string, object> customData = ((GetCounterexampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1816,8 +1992,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1825,6 +1999,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1862,6 +2038,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (pageLimit != null)
                 req.Parameters["page_limit"] = pageLimit;
             if (includeCount != null)
@@ -1904,6 +2087,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             CounterexampleCollection result = new CounterexampleCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListCounterexamplesRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -1917,8 +2101,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -1926,6 +2108,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -1960,6 +2144,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -1995,6 +2186,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Counterexample result = new Counterexample();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateCounterexampleRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2008,8 +2200,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2017,6 +2207,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2049,6 +2241,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -2084,6 +2283,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Entity result = new Entity();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateEntityRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2097,8 +2297,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2106,6 +2304,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2139,6 +2339,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -2172,6 +2379,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteEntityRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2185,8 +2393,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2194,6 +2400,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2229,6 +2437,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (includeAudit != null)
                 req.Parameters["include_audit"] = includeAudit;
             if (export != null)
@@ -2265,6 +2480,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             EntityExport result = new EntityExport();
             fsData data = null;
             Dictionary<string, object> customData = ((GetEntityRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2278,8 +2494,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2287,6 +2501,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2325,6 +2541,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (export != null)
                 req.Parameters["export"] = export;
@@ -2368,6 +2591,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             EntityCollection result = new EntityCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListEntitiesRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2381,8 +2605,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2390,6 +2612,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2424,6 +2648,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -2459,6 +2690,116 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Entity result = new Entity();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateEntityRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
+
+            if (resp.Success)
+            {
+                try
+                {
+                    fsResult r = fsJsonParser.Parse(Encoding.UTF8.GetString(resp.Data), out data);
+                    if (!r.Succeeded)
+                        throw new WatsonException(r.FormattedMessages);
+
+                    object obj = result;
+                    r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
+                    if (!r.Succeeded)
+                        throw new WatsonException(r.FormattedMessages);
+                }
+                catch (Exception e)
+                {
+                    Log.Error("Assistant.OnUpdateEntityResponse()", "Exception: {0}", e.ToString());
+                    resp.Success = false;
+                }
+            }
+
+            customData.Add("json", data);
+
+            if (resp.Success)
+            {
+                if (((UpdateEntityRequestObj)req).SuccessCallback != null)
+                    ((UpdateEntityRequestObj)req).SuccessCallback(result, customData);
+            }
+            else
+            {
+                if (((UpdateEntityRequestObj)req).FailCallback != null)
+                    ((UpdateEntityRequestObj)req).FailCallback(resp.Error, customData);
+            }
+        }
+
+        /// <summary>
+        /// List entity mentions.
+        ///
+        /// List mentions for a contextual entity. An entity mention is an occurrence of a contextual entity in the
+        /// context of an intent user input example.
+        ///
+        /// This operation is limited to 200 requests per 30 minutes. For more information, see **Rate limiting**.
+        /// </summary>
+        /// <param name="successCallback">The function that is called when the operation is successful.</param>
+        /// <param name="failCallback">The function that is called when the operation fails.</param>
+        /// <param name="workspaceId">Unique identifier of the workspace.</param>
+        /// <param name="entity">The name of the entity.</param>
+        /// <param name="export">Whether to include all element content in the returned data. If **export**=`false`, the
+        /// returned data includes only information about the element itself. If **export**=`true`, all content,
+        /// including subelements, is included. (optional, default to false)</param>
+        /// <param name="includeAudit">Whether to include the audit properties (`created` and `updated` timestamps) in
+        /// the response. (optional, default to false)</param>
+        /// <returns><see cref="EntityMentionCollection" />EntityMentionCollection</returns>
+        /// <param name="customData">A Dictionary<string, object> of data that will be passed to the callback. The raw
+        /// json output from the REST call will be passed in this object as the value of the 'json'
+        /// key.</string></param>
+        public bool ListMentions(SuccessCallback<EntityMentionCollection> successCallback, FailCallback failCallback, string workspaceId, string entity, bool? export = null, bool? includeAudit = null, Dictionary<string, object> customData = null)
+        {
+            if (successCallback == null)
+                throw new ArgumentNullException("successCallback");
+            if (failCallback == null)
+                throw new ArgumentNullException("failCallback");
+
+            ListMentionsRequestObj req = new ListMentionsRequestObj();
+            req.SuccessCallback = successCallback;
+            req.FailCallback = failCallback;
+            req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if (req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach (KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
+            req.Parameters["version"] = VersionDate;
+            if (export != null)
+                req.Parameters["export"] = export;
+            if (includeAudit != null)
+                req.Parameters["include_audit"] = includeAudit;
+            req.OnResponse = OnListMentionsResponse;
+
+            RESTConnector connector = RESTConnector.GetConnector(Credentials, string.Format("/v1/workspaces/{0}/entities/{1}/mentions", workspaceId, entity));
+            if (connector == null)
+                return false;
+
+            return connector.Send(req);
+        }
+
+        private class ListMentionsRequestObj : RESTConnector.Request
+        {
+            /// <summary>
+            /// The success callback.
+            /// </summary>
+            public SuccessCallback<EntityMentionCollection> SuccessCallback { get; set; }
+            /// <summary>
+            /// The fail callback.
+            /// </summary>
+            public FailCallback FailCallback { get; set; }
+            /// <summary>
+            /// Custom data.
+            /// </summary>
+            public Dictionary<string, object> CustomData { get; set; }
+        }
+
+        private void OnListMentionsResponse(RESTConnector.Request req, RESTConnector.Response resp)
+        {
+            EntityMentionCollection result = new EntityMentionCollection();
+            fsData data = null;
+            Dictionary<string, object> customData = ((ListMentionsRequestObj)req).CustomData;
 
             if (resp.Success)
             {
@@ -2477,22 +2818,23 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                 }
                 catch (Exception e)
                 {
-                    Log.Error("Assistant.OnUpdateEntityResponse()", "Exception: {0}", e.ToString());
+                    Log.Error("Assistant.OnListMentionsResponse()", "Exception: {0}", e.ToString());
                     resp.Success = false;
                 }
             }
 
             if (resp.Success)
             {
-                if (((UpdateEntityRequestObj)req).SuccessCallback != null)
-                    ((UpdateEntityRequestObj)req).SuccessCallback(result, customData);
+                if (((ListMentionsRequestObj)req).SuccessCallback != null)
+                    ((ListMentionsRequestObj)req).SuccessCallback(result, customData);
             }
             else
             {
-                if (((UpdateEntityRequestObj)req).FailCallback != null)
-                    ((UpdateEntityRequestObj)req).FailCallback(resp.Error, customData);
+                if (((ListMentionsRequestObj)req).FailCallback != null)
+                    ((ListMentionsRequestObj)req).FailCallback(resp.Error, customData);
             }
         }
+
         /// <summary>
         /// Add entity value. Create a new value for an entity.    This operation is limited to 1000 requests per 30 minutes. For more information, see [**Rate limiting**](https://www.ibm.com/watson/developercloud/assistant/api/v1/#rate-limiting).
         /// </summary>
@@ -2514,6 +2856,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -2549,6 +2898,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Value result = new Value();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateValueRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2562,8 +2912,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2571,6 +2919,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2605,6 +2955,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -2638,6 +2995,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteValueRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2651,8 +3009,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2660,6 +3016,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2696,6 +3054,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (export != null)
                 req.Parameters["export"] = export;
             if (includeAudit != null)
@@ -2732,6 +3097,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             ValueExport result = new ValueExport();
             fsData data = null;
             Dictionary<string, object> customData = ((GetValueRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2745,8 +3111,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2754,6 +3118,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2793,6 +3159,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (export != null)
                 req.Parameters["export"] = export;
@@ -2836,6 +3209,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             ValueCollection result = new ValueCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListValuesRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2849,8 +3223,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2858,6 +3230,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2893,6 +3267,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -2928,6 +3309,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Value result = new Value();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateValueRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -2941,8 +3323,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -2950,6 +3330,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -2984,6 +3366,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -3019,6 +3408,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Synonym result = new Synonym();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateSynonymRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3032,8 +3422,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3041,6 +3429,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3076,6 +3466,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -3109,6 +3506,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteSynonymRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3122,8 +3520,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3131,6 +3527,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3167,6 +3565,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (includeAudit != null)
                 req.Parameters["include_audit"] = includeAudit;
             req.Parameters["version"] = VersionDate;
@@ -3201,6 +3606,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Synonym result = new Synonym();
             fsData data = null;
             Dictionary<string, object> customData = ((GetSynonymRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3214,8 +3620,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3223,6 +3627,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3262,6 +3668,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (pageLimit != null)
                 req.Parameters["page_limit"] = pageLimit;
@@ -3303,6 +3716,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             SynonymCollection result = new SynonymCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListSynonymsRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3316,8 +3730,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3325,6 +3737,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3361,6 +3775,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -3396,6 +3817,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             Synonym result = new Synonym();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateSynonymRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3409,8 +3831,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3418,6 +3838,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3450,6 +3872,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -3485,6 +3914,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             DialogNode result = new DialogNode();
             fsData data = null;
             Dictionary<string, object> customData = ((CreateDialogNodeRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3498,8 +3928,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3507,6 +3935,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3540,6 +3970,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Delete = true;
 
@@ -3573,6 +4010,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             object result = new object();
             fsData data = null;
             Dictionary<string, object> customData = ((DeleteDialogNodeRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3586,8 +4024,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3595,6 +4031,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3629,6 +4067,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if (includeAudit != null)
                 req.Parameters["include_audit"] = includeAudit;
             req.Parameters["version"] = VersionDate;
@@ -3663,6 +4108,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             DialogNode result = new DialogNode();
             fsData data = null;
             Dictionary<string, object> customData = ((GetDialogNodeRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3676,8 +4122,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3685,6 +4129,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3722,6 +4168,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (pageLimit != null)
                 req.Parameters["page_limit"] = pageLimit;
@@ -3763,6 +4216,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             DialogNodeCollection result = new DialogNodeCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListDialogNodesRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3776,8 +4230,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3785,6 +4237,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3819,6 +4273,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             req.Headers["Content-Type"] = "application/json";
             fsData data = null;
@@ -3854,6 +4315,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             DialogNode result = new DialogNode();
             fsData data = null;
             Dictionary<string, object> customData = ((UpdateDialogNodeRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3867,8 +4329,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3876,6 +4336,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -3910,6 +4372,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             if(!string.IsNullOrEmpty(filter))
                 req.Parameters["filter"] = filter;
             if (!string.IsNullOrEmpty(sort))
@@ -3951,6 +4420,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             LogCollection result = new LogCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListAllLogsRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -3964,8 +4434,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -3973,6 +4441,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -4009,6 +4479,13 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             req.SuccessCallback = successCallback;
             req.FailCallback = failCallback;
             req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if(req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach(KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
             req.Parameters["version"] = VersionDate;
             if (pageLimit != null)
                 req.Parameters["page_limit"] = pageLimit;
@@ -4048,6 +4525,7 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
             LogCollection result = new LogCollection();
             fsData data = null;
             Dictionary<string, object> customData = ((ListLogsRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
 
             if (resp.Success)
             {
@@ -4061,8 +4539,6 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
                     if (!r.Succeeded)
                         throw new WatsonException(r.FormattedMessages);
-
-                    customData.Add("json", data);
                 }
                 catch (Exception e)
                 {
@@ -4070,6 +4546,8 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     resp.Success = false;
                 }
             }
+
+            customData.Add("json", data);
 
             if (resp.Success)
             {
@@ -4082,6 +4560,108 @@ namespace IBM.Watson.DeveloperCloud.Services.Assistant.v1
                     ((ListLogsRequestObj)req).FailCallback(resp.Error, customData);
             }
         }
+
+        #region Delete User Data
+        /// <summary>
+        /// Deletes all data associated with a specified customer ID. The method has no effect if no data is associated with the customer ID. 
+        /// You associate a customer ID with data by passing the X-Watson-Metadata header with a request that passes data. 
+        /// For more information about personal data and customer IDs, see [**Information security**](https://console.bluemix.net/docs/services/discovery/information-security.html).
+        /// </summary>
+        /// <param name="successCallback">The function that is called when the operation is successful.</param>
+        /// <param name="failCallback">The function that is called when the operation fails.</param>
+        /// <param name="customerId">The customer ID for which all data is to be deleted.</param>
+        /// <returns><see cref="object" />object</returns>
+        /// <param name="customData">A Dictionary<string, object> of data that will be passed to the callback. The raw json output from the REST call will be passed in this object as the value of the 'json' key.</string></param>
+        public bool DeleteUserData(SuccessCallback<object> successCallback, FailCallback failCallback, string customerId, Dictionary<string, object> customData = null)
+        {
+            if (successCallback == null)
+                throw new ArgumentNullException("successCallback");
+            if (failCallback == null)
+                throw new ArgumentNullException("failCallback");
+            if (string.IsNullOrEmpty(customerId))
+                throw new ArgumentNullException("customerId");
+
+            DeleteUserDataRequestObj req = new DeleteUserDataRequestObj();
+            req.SuccessCallback = successCallback;
+            req.FailCallback = failCallback;
+            req.CustomData = customData == null ? new Dictionary<string, object>() : customData;
+            if (req.CustomData.ContainsKey(Constants.String.CUSTOM_REQUEST_HEADERS))
+            {
+                foreach (KeyValuePair<string, string> kvp in req.CustomData[Constants.String.CUSTOM_REQUEST_HEADERS] as Dictionary<string, string>)
+                {
+                    req.Headers.Add(kvp.Key, kvp.Value);
+                }
+            }
+            req.Parameters["customer_id"] = customerId;
+            req.Parameters["version"] = VersionDate;
+            req.Delete = true;
+
+            req.OnResponse = OnDeleteUserDataResponse;
+
+            RESTConnector connector = RESTConnector.GetConnector(Credentials, "/v1/user_data");
+            if (connector == null)
+                return false;
+
+            return connector.Send(req);
+        }
+
+        private class DeleteUserDataRequestObj : RESTConnector.Request
+        {
+            /// <summary>
+            /// The success callback.
+            /// </summary>
+            public SuccessCallback<object> SuccessCallback { get; set; }
+            /// <summary>
+            /// The fail callback.
+            /// </summary>
+            public FailCallback FailCallback { get; set; }
+            /// <summary>
+            /// Custom data.
+            /// </summary>
+            public Dictionary<string, object> CustomData { get; set; }
+        }
+
+        private void OnDeleteUserDataResponse(RESTConnector.Request req, RESTConnector.Response resp)
+        {
+            object result = new object();
+            fsData data = null;
+            Dictionary<string, object> customData = ((DeleteUserDataRequestObj)req).CustomData;
+            customData.Add(Constants.String.RESPONSE_HEADERS, resp.Headers);
+
+            if (resp.Success)
+            {
+                try
+                {
+                    fsResult r = fsJsonParser.Parse(Encoding.UTF8.GetString(resp.Data), out data);
+                    if (!r.Succeeded)
+                        throw new WatsonException(r.FormattedMessages);
+
+                    object obj = result;
+                    r = _serializer.TryDeserialize(data, obj.GetType(), ref obj);
+                    if (!r.Succeeded)
+                        throw new WatsonException(r.FormattedMessages);
+                }
+                catch (Exception e)
+                {
+                    Log.Error("Assistant.OnDeleteUserDataResponse()", "Exception: {0}", e.ToString());
+                    resp.Success = false;
+                }
+            }
+
+            customData.Add("json", data);
+
+            if (resp.Success)
+            {
+                if (((DeleteUserDataRequestObj)req).SuccessCallback != null)
+                    ((DeleteUserDataRequestObj)req).SuccessCallback(result, customData);
+            }
+            else
+            {
+                if (((DeleteUserDataRequestObj)req).FailCallback != null)
+                    ((DeleteUserDataRequestObj)req).FailCallback(resp.Error, customData);
+            }
+        }
+        #endregion
 
         #region IWatsonService Interface
         /// <exclude />

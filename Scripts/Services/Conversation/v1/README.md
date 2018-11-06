@@ -1,5 +1,7 @@
 # Conversation
 
+**Conversation V1 is deprecated and will be removed in the next major release of the SDK. Use Assistant V1 or Assistant V2.**
+
 With the IBM Watson™ [Conversation][conversation] service, you can create an application that understands natural-language input and uses machine learning to respond to customers in a way that simulates a conversation between humans.
 
 ## Usage
@@ -8,28 +10,6 @@ You complete these steps to implement your application:
 * Configure a workspace. With the easy-to-use graphical environment, you set up the dialog flow and training data for your application.
 
 * Develop your application. You code your application to connect to the Conversation workspace through API calls. You then integrate your app with other systems that you need, including back-end systems and third-party services such as chat services or social media.
-
-### Instantiating and authenticating the service
-Before you can send requests to the service it must be instantiated and credentials must be set.
-```cs
-using IBM.Watson.DeveloperCloud.Services.Conversation.v1;
-using IBM.Watson.DeveloperCloud.Utilities;
-
-void Start()
-{
-    Credentials credentials = new Credentials(<username>, <password>, <url>);
-    Conversation _conversation = new Conversation(credentials);
-}
-```
-
-### Fail handler
-These examples use a common fail handler.
-```cs
-private void OnFail(RESTConnector.Error error, Dictionary<string, object> customData)
-{
-    Log.Error("ExampleConversation.OnFail()", "Error received: {0}", error.ToString());
-}
-```
 
 ### Message
 Send a message to the Conversation instance

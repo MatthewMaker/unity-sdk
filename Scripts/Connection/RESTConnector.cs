@@ -43,6 +43,7 @@ namespace IBM.Watson.DeveloperCloud.Connection
         public const string AUTHENTICATION_AUTHORIZATION_HEADER = "Authorization";
         public const long HTTP_STATUS_OK = 200;
         public const long HTTP_STATUS_CREATED = 201;
+        public const long HTTP_STATUS_ACCEPTED = 202;
         public const long HTTP_STATUS_NO_CONTENT = 204;
         #region Public Types
         /// <summary>
@@ -84,6 +85,10 @@ namespace IBM.Watson.DeveloperCloud.Connection
             /// The http response code from the server
             /// </summary>
             public long HttpResponseCode { get; set; }
+            /// <summary>
+            /// The response headers
+            /// </summary>
+            public Dictionary<string, string> Headers { get; set; }
             #endregion
         };
 
@@ -209,6 +214,10 @@ namespace IBM.Watson.DeveloperCloud.Connection
             /// </summary>
             public bool Delete { get; set; }
             /// <summary>
+            /// True to send a post method.
+            /// </summary>
+            public bool Post { get; set; }
+            /// <summary>
             /// The name of the function to invoke on the server.
             /// </summary>
             public string Function { get; set; }
@@ -278,6 +287,8 @@ namespace IBM.Watson.DeveloperCloud.Connection
             RESTConnector connector = new RESTConnector();
             connector.URL = credentials.Url + function;
             connector.Authentication = credentials;
+            if (connector.Authentication.HasIamTokenData())
+                connector.Authentication.GetToken();
 
             return connector;
         }
@@ -323,13 +334,17 @@ namespace IBM.Watson.DeveloperCloud.Connection
                 if (headers == null)
                     throw new ArgumentNullException("headers");
 
-                if (Authentication.HasAuthorizationToken())
+                if (Authentication.HasWatsonAuthenticationToken())
                 {
-                    headers.Add(AUTHENTICATION_TOKEN_AUTHORIZATION_HEADER, Authentication.AuthenticationToken);
+                    headers.Add(AUTHENTICATION_TOKEN_AUTHORIZATION_HEADER, Authentication.WatsonAuthenticationToken);
                 }
                 else if (Authentication.HasCredentials())
                 {
                     headers.Add(AUTHENTICATION_AUTHORIZATION_HEADER, Authentication.CreateAuthorization());
+                }
+                else if(Authentication.HasIamTokenData())
+                {
+                    headers.Add(AUTHENTICATION_AUTHORIZATION_HEADER, string.Format("Bearer {0}", Authentication.IamAccessToken));
                 }
             }
 
@@ -395,7 +410,7 @@ namespace IBM.Watson.DeveloperCloud.Connection
                 Response resp = new Response();
 
                 DateTime startTime = DateTime.Now;
-                if (!req.Delete)
+                if (!req.Delete && !req.Post)
                 {
                     WWW www = null;
                     if (req.Forms != null)
@@ -471,6 +486,7 @@ namespace IBM.Watson.DeveloperCloud.Connection
                             {
                                 case HTTP_STATUS_OK:
                                 case HTTP_STATUS_CREATED:
+                                case HTTP_STATUS_ACCEPTED:
                                     bError = false;
                                     break;
                                 default:
@@ -524,6 +540,8 @@ namespace IBM.Watson.DeveloperCloud.Connection
                         resp.Error = error;
                     }
 
+                    resp.Headers = www.responseHeaders;
+
                     resp.ElapsedTime = (float)(DateTime.Now - startTime).TotalSeconds;
 
                     // if the response is over a threshold, then log with status instead of debug
@@ -534,6 +552,33 @@ namespace IBM.Watson.DeveloperCloud.Connection
                         req.OnResponse(req, resp);
 
                     www.Dispose();
+                }
+                else if(req.Post)
+                {
+                    float timeout = Mathf.Max(Constants.Config.Timeout, req.Timeout);
+
+                    PostRequest postReq = new PostRequest();
+                    Runnable.Run(postReq.Send(url, req.Headers));
+                    while (!postReq.IsComplete)
+                    {
+                        if (req.Cancel)
+                            break;
+                        if ((DateTime.Now - startTime).TotalSeconds > timeout)
+                            break;
+                        yield return null;
+                    }
+
+                    if (req.Cancel)
+                        continue;
+
+                    resp.Success = postReq.Success;
+                    resp.Data = postReq.Data;
+                    resp.Error = postReq.Error;
+                    resp.HttpResponseCode = postReq.HttpResponseCode;
+                    resp.ElapsedTime = (float)(DateTime.Now - startTime).TotalSeconds;
+                    resp.Headers = postReq.ResponseHeaders;
+                    if (req.OnResponse != null)
+                        req.OnResponse(req, resp);
                 }
                 else
                 {
@@ -563,6 +608,7 @@ namespace IBM.Watson.DeveloperCloud.Connection
                     resp.Error = deleteReq.Error;
                     resp.HttpResponseCode = deleteReq.HttpResponseCode;
                     resp.ElapsedTime = (float)(DateTime.Now - startTime).TotalSeconds;
+                    resp.Headers = deleteReq.ResponseHeaders;
                     if (req.OnResponse != null)
                         req.OnResponse(req, resp);
                 }
@@ -624,11 +670,12 @@ namespace IBM.Watson.DeveloperCloud.Connection
             public long HttpResponseCode { get; set; }
             public byte[] Data { get; set; }
             public Error Error { get; set; }
+            public Dictionary<string, string> ResponseHeaders { get; set; }
 
             public IEnumerator Send(string url, Dictionary<string, string> headers)
             {
 #if ENABLE_DEBUGGING
-                Log.Debug("DeleteRequest.Send()", "DeleteRequest, Send: {0}, _thread:{1}", url, _thread);
+                Log.Debug("DeleteRequest.Send()", "DeleteRequest, Send: {0}", url);
 #endif
 
                 URL = url;
@@ -671,9 +718,76 @@ namespace IBM.Watson.DeveloperCloud.Connection
                     };
                 }
 
-                Success = deleteReq.responseCode == HTTP_STATUS_OK || deleteReq.responseCode == HTTP_STATUS_OK || deleteReq.responseCode == HTTP_STATUS_NO_CONTENT;
+                Success = deleteReq.responseCode == HTTP_STATUS_OK || deleteReq.responseCode == HTTP_STATUS_OK || deleteReq.responseCode == HTTP_STATUS_NO_CONTENT || deleteReq.responseCode == HTTP_STATUS_ACCEPTED;
                 HttpResponseCode = deleteReq.responseCode;
+                ResponseHeaders = deleteReq.GetResponseHeaders();
                 Data = deleteReq.downloadHandler.data;
+                Error = error;
+                IsComplete = true;
+            }
+        };
+
+        private class PostRequest
+        {
+            public string URL { get; set; }
+            public Dictionary<string, string> Headers { get; set; }
+            public bool IsComplete { get; set; }
+            public bool Success { get; set; }
+            public long HttpResponseCode { get; set; }
+            public byte[] Data { get; set; }
+            public Error Error { get; set; }
+            public Dictionary<string, string> ResponseHeaders { get; set; }
+
+            public IEnumerator Send(string url, Dictionary<string, string> headers)
+            {
+#if ENABLE_DEBUGGING
+                Log.Debug("PostRequest.Send()", "PostRequest, Send: {0}", url);
+#endif
+
+                URL = url;
+                Headers = new Dictionary<string, string>();
+                foreach (var kp in headers)
+                {
+                    if (kp.Key != "User-Agent")
+                        Headers[kp.Key] = kp.Value;
+                }
+
+#if !NETFX_CORE
+                // This fixes the exception thrown by self-signed certificates.
+                ServicePointManager.ServerCertificateValidationCallback = new RemoteCertificateValidationCallback(delegate { return true; });
+#endif
+
+#if ENABLE_DEBUGGING
+                Log.Debug("PostRequest.Send()", "PostRequest, ProcessRequest {0}", URL);
+#endif
+                UnityWebRequest postReq = UnityWebRequest.Get(URL);
+                postReq.method = UnityWebRequest.kHttpVerbPOST;
+                postReq.downloadHandler = new DownloadHandlerBuffer();
+
+                foreach (var kp in Headers)
+                    postReq.SetRequestHeader(kp.Key, kp.Value);
+#if UNITY_2017_2_OR_NEWER
+                yield return postReq.SendWebRequest();
+#else
+                yield return postReq.Send();
+#endif
+                Error error = null;
+                if (!string.IsNullOrEmpty(postReq.error))
+                {
+                    error = new Error()
+                    {
+                        URL = url,
+                        ErrorCode = postReq.responseCode,
+                        ErrorMessage = postReq.error,
+                        Response = postReq.downloadHandler.text,
+                        ResponseHeaders = postReq.GetResponseHeaders()
+                    };
+                }
+
+                Success = postReq.responseCode == HTTP_STATUS_OK || postReq.responseCode == HTTP_STATUS_CREATED || postReq.responseCode == HTTP_STATUS_NO_CONTENT || postReq.responseCode == HTTP_STATUS_ACCEPTED;
+                HttpResponseCode = postReq.responseCode;
+                ResponseHeaders = postReq.GetResponseHeaders();
+                Data = postReq.downloadHandler.data;
                 Error = error;
                 IsComplete = true;
             }
